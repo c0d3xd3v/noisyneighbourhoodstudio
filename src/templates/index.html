@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="de">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Audio Trigger Recorder</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+
+<body>
+
+<script>
+
+async function pingPong(count = 20) {
+    let results = [];
+
+    for (let i = 0; i < count; i++) {
+        let t0 = performance.now();
+        await fetch("/ping");
+        let t1 = performance.now();
+
+        let rtt = t1 - t0;
+        results.push(rtt);
+
+        document.getElementById("result").innerHTML =
+            `Ping ${i+1}/${count}: ${rtt.toFixed(2)} ms`;
+
+        await new Promise(r => setTimeout(r, 300));
+    }
+
+    let avg = results.reduce((a,b) => a + b) / results.length;
+
+    document.getElementById("result").innerHTML =
+        `✅ AVG RTT: ${avg.toFixed(2)} ms`;
+}
+
+let recorder;
+let chunks = [];
+let stream;
+let isRecording = false;
+
+async function startRecording() {
+
+    if (isRecording) return;
+
+    // 1. Die aktuell ausgewählte Geräte-ID aus dem HTML-Dropdown auslesen
+    const deviceSelect = document.querySelector('select[name="device"]');
+    const selectedDevice = deviceSelect ? deviceSelect.value : "0"; // Fallback auf "0", falls nicht gefunden
+
+    // 2. Den aktuell eingegebenen Schwellenwert aus dem Input-Feld auslesen
+    const thresholdInput = document.querySelector('input[name="threshold"]');
+    const selectedThreshold = thresholdInput ? thresholdInput.value : "-45"; // Bleibt leer, wenn nichts eingegeben wurde
+
+    // Vorbereitung der Formulardaten für Flask (request.form)
+    const formData = new FormData();
+    formData.append("device", selectedDevice); // MUSS vorhanden sein. Ändern Sie "0" ggf. auf Ihren gewünschten Geräte-Index.
+    formData.append("threshold", selectedThreshold); // Optional, kann leer bleiben für 'None' im Backend
+
+    // 1. Server Trigger AN
+    await fetch("/recording/start", {
+        method: "POST",
+        body: formData // Nutzt FormData statt JSON. Der Browser setzt die Header hierbei automatisch!
+    });
+
+    // 2. Browser Recording START
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+    recorder = new MediaRecorder(stream);
+    chunks = [];
+
+    recorder.ondataavailable = e => chunks.push(e.data);
+
+    recorder.onstart = () => {
+        isRecording = true;
+        document.getElementById("rec_status").innerHTML = "🔴 Aufnahme läuft...";
+    };
+
+    recorder.start();
+}
+
+async function stopRecording() {
+
+    if (!recorder || !isRecording) return;
+
+    // 1. Server Trigger AUS
+    await fetch("/recording/stop", {
+        method: "POST" // Auf POST umgestellt, Header entfernt
+    });
+
+    recorder.onstop = () => {
+
+        isRecording = false;
+
+        const blob = new Blob(chunks, { type: "audio/webm" });
+        const url = URL.createObjectURL(blob);
+
+        document.getElementById("rec_status").innerHTML =
+            "⏹ Aufnahme fertig";
+
+        // Player anzeigen
+        document.getElementById("player").src = url;
+        document.getElementById("player").play();
+
+        uploadRecording(blob);
+    };
+
+    recorder.stop();
+
+    stream.getTracks().forEach(t => t.stop());
+}
+
+async function uploadRecording(blob) {
+    const form = new FormData();
+    form.append("file", blob, "local.webm");
+
+    await fetch("/upload_local", {
+        method: "POST",
+        body: form
+    });
+}
+
+</script>
+
+
+<div class="container">
+
+    <h1>🎤 Audio Trigger Recorder</h1>
+
+    <div class="card">
+
+        <div class="status">
+            {% if running %}
+                <span class="dot green"></span> Aktiv
+            {% else %}
+                <span class="dot red"></span> Gestoppt
+            {% endif %}
+        </div>
+
+
+            <label>Mikrofon</label>
+            <select name="device">
+                {% for d in devices %}
+                    <option value="{{d.id}}">{{d.id}} - {{d.name}}</option>
+                {% endfor %}
+            </select>
+
+            <label>Trigger (dB)</label>
+            <input type="number" step="0.1" name="threshold"
+                   placeholder="{{ threshold }}">
+
+            <div class="info">
+                Samplerate: {{ samplerate }} Hz
+            </div>
+
+            <button class="start" type="button" onclick="startRecording()">
+                ▶ Start
+            </button>
+
+
+
+            <button class="stop" type="button" onclick="stopRecording()">
+                ■ Stop
+            </button>
+
+            <div id="rec_status">bereit</div>
+
+        <button onclick="pingPong()">Netzwerklatenz messen</button>
+        <h2>Netzwerklatenz : </h2>
+        <div id="result">Noch kein Test gestartet</div>
+
+        <h2>Lokale Aufnahme</h2>
+        <audio id="player" controls></audio>
+
+    </div>
+
+</div>
+
+</body>
+</html>

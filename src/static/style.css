@@ -1,0 +1,107 @@
+body {
+    margin: 0;
+    font-family: Arial, sans-serif;
+    background: #111827;
+    color: #f3f4f6;
+
+    /* ⬆ alles größer */
+    font-size: 20px;
+}
+
+.container {
+    width: 100%;
+    max-width: 900px;   /* verhindert zu extreme Breite auf Desktop */
+    margin: 40px auto;  /* zentriert, aber fast full width */
+    padding: 16px;      /* kleiner Rand innen */
+}
+
+h1 {
+    font-size: 34px;   /* ⬆ größer */
+    margin-bottom: 28px;
+    text-align: center;
+}
+
+.card {
+    background: #1f2937;
+    padding: 34px;     /* ⬆ mehr Luft */
+    border-radius: 18px;
+    box-shadow: 0 14px 50px rgba(0,0,0,0.55);
+}
+
+label {
+    display: block;
+    margin-top: 18px;
+    margin-bottom: 10px;
+    font-size: 16px;
+    color: #cbd5e1;
+}
+
+/* ⬇ WICHTIG: alles gleiche Breite */
+select,
+input {
+    width: 100%;
+    box-sizing: border-box;   /* verhindert Überlauf */
+    padding: 16px;             /* ⬆ größer */
+    border-radius: 12px;
+    border: 1px solid #374151;
+    background: #111827;
+    color: white;
+    font-size: 18px;
+}
+
+button {
+    width: 100%;              /* gleich wie Inputs */
+    box-sizing: border-box;
+    padding: 18px;            /* ⬆ größer */
+    margin-top: 18px;
+    border: none;
+    border-radius: 14px;
+    font-size: 20px;
+    cursor: pointer;
+    transition: 0.2s;
+    font-weight: bold;
+}
+
+button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.start {
+    background: #10b981;
+}
+
+.start:hover {
+    background: #059669;
+}
+
+.stop {
+    background: #ef4444;
+}
+
+.stop:hover {
+    background: #dc2626;
+}
+
+.status {
+    margin-bottom: 22px;
+    font-size: 20px;
+}
+
+.dot {
+    height: 14px;
+    width: 14px;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 10px;
+}
+
+.green { background: #22c55e; }
+.red { background: #ef4444; }
+
+.info {
+    margin-top: 16px;
+    font-size: 15px;
+    color: #9ca3af;
+    text-align: center;
+}

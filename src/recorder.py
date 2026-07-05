@@ -8,6 +8,8 @@ import datetime
 import wave
 import csv
 import os
+import threading
+
 
 # === Konfiguration ===
 chunk_size = 1024
@@ -21,9 +23,7 @@ db_threshold      = -35.0  # Standardwert, falls keine Kalibrierung/Argument
 # Format: ((Start_Stunde, Start_Minute), (End_Stunde, End_Minute))
 # Unterstützt auch Nachtfenster über Mitternacht (z.B. von 22:00 bis 06:00 Uhr)
 ZEITFENSTER = [
-    ((20, 35), (20, 36)),  # Dein Testfenster: 20:32 Uhr bis 20:33 Uhr
-    ((13, 0),  (15, 0)),   # Mittagsruhe:      13:00 Uhr bis 15:00 Uhr
-    ((22, 0),  (6, 0))     # Nachtruhe:        22:00 Uhr bis 06:00 Uhr morgens
+    ((0, 0),(23,59))
 ]
 
 # === Globale Variablen (Pfade & Zustände) ===
@@ -41,6 +41,9 @@ post_roll_samples_collected = 0
 clip_buffer = []
 trigger_sample_index = None
 clip_filename = None
+
+measurement_thread = None
+service_running = False
 
 # === Hilfsfunktionen ===
 
@@ -238,9 +241,96 @@ def audio_callback(indata, frames, time_info, status):
 
     print_inline(f"{timestamp} | RMS dB: {db:.2f} | Peak dB: {peak_db:.2f}")
 
+def run_measurement_core(device_id, threshold=None):
+    global rode_device_index, db_threshold, samplerate, ringbuffer, post_roll_samples_needed, log_file, service_running
+
+    # WICHTIG: service_running wird jetzt von Flask beim Klick auf Start auf True gesetzt!
+    rode_device_index = device_id
+
+    select_best_samplerate(rode_device_index)
+    ringbuffer = deque(maxlen=int(buffer_seconds * samplerate))
+    post_roll_samples_needed = int(post_roll_seconds * samplerate)
+
+    if threshold is None:
+        db_threshold = calibrate_noise_floor(
+            duration=5, device_index=rode_device_index, current_samplerate=samplerate
+        )
+    else:
+        db_threshold = float(threshold)
+
+    stream = None
+    session_active = False
+
+    print("\n💤 System im Standby. Warte auf Start-Befehl via WLAN...")
+
+    try:
+        # Die Schleife läuft erst, wenn service_running True ist
+        while service_running:
+            active_now = is_in_any_time_window()
+
+            if active_now and not session_active:
+                print(f"\n[{datetime.datetime.now().strftime('%H:%M:%S')}] Überwachungsfenster erreicht. Starte Session...")
+                create_new_session()
+
+                stream = sd.InputStream(
+                    device=rode_device_index,
+                    channels=1,
+                    samplerate=samplerate,
+                    blocksize=chunk_size,
+                    callback=audio_callback
+                )
+                stream.start()
+                session_active = True
+
+            elif not active_now and session_active:
+                print(f"\n[{datetime.datetime.now().strftime('%H:%M:%S')}] Zeitfenster beendet. Schließe Session...")
+                if stream:
+                    stream.stop()
+                    stream.close()
+                    stream = None
+                if log_file and not log_file.closed:
+                    log_file.close()
+                session_active = False
+
+            time.sleep(1.0)
+
+    finally:
+        if stream:
+            stream.stop()
+            stream.close()
+        if log_file and not log_file.closed:
+            log_file.close()
+        print("\n🛑 Audio-Kernschleife sauber beendet und im Standby.")
+
+def start_service(device_id, threshold=None):
+    global measurement_thread
+    global service_running
+
+    if service_running:
+        return False
+
+    service_running = True
+
+    measurement_thread = threading.Thread(
+        target=run_measurement_core,
+        args=(device_id, threshold),
+        daemon=True
+    )
+
+    measurement_thread.start()
+    return True
+
+def stop_service():
+    global service_running
+
+    service_running = False
+
+
 # === Hauptprogramm ===
 
 if __name__ == "__main__":
+    service_running = True
+
     parser = argparse.ArgumentParser(
         description="Audio Trigger Recorder für Lärm- und Impulsüberwachung in bestimmten Zeitfenstern.",
         add_help=False
@@ -274,80 +364,4 @@ if __name__ == "__main__":
         print("\n❌ Fehler: Für den Überwachungsmodus wird das Argument `--deviceid` zwingend benötigt.")
         list_devices(with_exit=True)
 
-    rode_device_index = args.deviceid
-
-    # 1. Beste Samplerate ermitteln
-    select_best_samplerate(rode_device_index)
-
-    # 2. Puffer-Variablen mit korrekter Samplerate initialisieren
-    ringbuffer = deque(maxlen=int(buffer_seconds * samplerate))
-    post_roll_samples_needed = int(post_roll_seconds * samplerate)
-
-    if args.timeout is not None:
-        print(f"Warte einmalig {args.timeout} Minuten vor dem Start...")
-        time.sleep(60 * args.timeout)
-
-    # 3. Threshold bestimmen
-    if args.dbthreshold is None:
-        db_threshold = calibrate_noise_floor(
-            duration=5, device_index=rode_device_index, current_samplerate=samplerate
-        )
-    else:
-        db_threshold = float(args.dbthreshold)
-        print("Nutze manuellen Schwellenwert:", db_threshold, "dB")
-
-    print("\n⏰ Aktive Überwachungsfenster:")
-    for s, e in ZEITFENSTER:
-        print(f"  • {s[0]:02d}:{s[1]:02d} bis {e[0]:02d}:{e[1]:02d} Uhr")
-    print("Drücke STRG+C zum Beenden.")
-
-    stream = None
-    session_active = False
-
-    try:
-        while True:
-            active_now = is_in_any_time_window()
-
-            if active_now and not session_active:
-                # --- EIN AKTIVES ZEITFENSTER HAT BEGONNEN ---
-                print(f"\n[{datetime.datetime.now().strftime('%H:%M:%S')}] Überwachungsfenster erreicht. Starte Session...")
-                create_new_session()
-
-                # Audio-Stream öffnen
-                stream = sd.InputStream(
-                    device=rode_device_index,
-                    channels=1,
-                    samplerate=samplerate,
-                    blocksize=chunk_size,
-                    callback=audio_callback
-                )
-                stream.start()
-                session_active = True
-                print(f"🎙️ Monitoring läuft... Pre-Roll: {buffer_seconds}s | Post-Roll: {post_roll_seconds}s")
-
-            elif not active_now and session_active:
-                # --- DAS AKTUELLE ZEITFENSTER IST ABGELAUFEN ---
-                print(f"\n[{datetime.datetime.now().strftime('%H:%M:%S')}] Zeitfenster beendet. Schließe aktuelle Session...")
-                if stream:
-                    stream.stop()
-                    stream.close()
-                    stream = None
-                if log_file and not log_file.closed:
-                    log_file.close()
-                session_active = False
-                print("💤 Warte auf das nächste Überwachungsfenster...")
-
-            elif not session_active:
-                # Statusanzeige in den inaktiven Phasen
-                print_inline(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Inaktiv (Ruhemodus) - Warte auf nächstes Zeitfenster...")
-
-            time.sleep(1.0)
-
-    except KeyboardInterrupt:
-        print("\n🚪 Programm durch Nutzer beendet.")
-    finally:
-        if stream:
-            stream.stop()
-            stream.close()
-        if log_file and not log_file.closed:
-            log_file.close()
+    run_measurement_core(args.deviceid, args.dbthreshold)
