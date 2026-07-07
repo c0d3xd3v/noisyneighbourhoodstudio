@@ -3,60 +3,101 @@ body {
     font-family: Arial, sans-serif;
     background: #111827;
     color: #f3f4f6;
-
-    /* ⬆ alles größer */
-    font-size: 20px;
+    font-size: 22px;          /* ⬆ Übergreifend größer für perfekte Lesbarkeit */
 }
 
 .container {
     width: 100%;
-    max-width: 900px;   /* verhindert zu extreme Breite auf Desktop */
-    margin: 40px auto;  /* zentriert, aber fast full width */
-    padding: 16px;      /* kleiner Rand innen */
+    max-width: 900px;         /* Verhindert extreme Breite auf Desktop */
+    margin: 40px auto;        /* Zentriert das Interface */
+    padding: 24px;            /* ⬆ Mehr Rand außen für Touch-Geräte */
+    box-sizing: border-box;
 }
 
 h1 {
-    font-size: 34px;   /* ⬆ größer */
-    margin-bottom: 28px;
+    font-size: 40px;          /* ⬆ Überschrift deutlich vergrößert */
+    margin-bottom: 34px;
     text-align: center;
 }
 
 .card {
     background: #1f2937;
-    padding: 34px;     /* ⬆ mehr Luft */
-    border-radius: 18px;
+    padding: 40px;            /* ⬆ Viel mehr Luft im inneren Container */
+    border-radius: 24px;      /* Weichere, modernere Ecken */
     box-shadow: 0 14px 50px rgba(0,0,0,0.55);
 }
 
+.status {
+    margin-bottom: 30px;      /* ⬆ Mehr Abstand zum nachfolgenden Element */
+    font-size: 24px;          /* ⬆ Status-Schrift vergrößert */
+    display: flex;
+    align-items: center;
+}
+
+.dot {
+    height: 18px;             /* ⬆ Größerer Statuspunkt */
+    width: 18px;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 12px;
+}
+
+.green { background: #22c55e; }
+.red { background: #ef4444; }
+
 label {
     display: block;
-    margin-top: 18px;
-    margin-bottom: 10px;
-    font-size: 16px;
+    margin-top: 28px;         /* ⬆ Mehr Abstand nach oben */
+    margin-bottom: 14px;      /* ⬆ Mehr Abstand zum Input */
+    font-size: 20px;          /* ⬆ Größere Label-Schrift */
     color: #cbd5e1;
 }
 
-/* ⬇ WICHTIG: alles gleiche Breite */
+/* Flexbox für das Checkbox-Label und die Checkbox nebeneinander */
+.checkbox-row {
+    display: flex;
+    align-items: center;
+    gap: 16px;                /* ⬆ Größerer Abstand zwischen Text und Box */
+    margin-top: 28px;
+    margin-bottom: 20px;
+}
+
+.checkbox-container {
+    margin: 0;                /* Setzt Standard-Label-Abstände innerhalb der Zeile zurück */
+    font-size: 20px;
+    white-space: nowrap;
+}
+
+/* Übergreifendes Styling für inputs und Auswahllisten */
 select,
 input {
     width: 100%;
-    box-sizing: border-box;   /* verhindert Überlauf */
-    padding: 16px;             /* ⬆ größer */
-    border-radius: 12px;
+    box-sizing: border-box;
+    padding: 20px;            /* ⬆ Massive Touch-Klickfläche */
+    border-radius: 14px;
     border: 1px solid #374151;
     background: #111827;
     color: white;
-    font-size: 18px;
+    font-size: 20px;          /* ⬆ Text in Feldern vergrößert */
 }
 
+/* Spezifisches Verhalten für Checkboxen innerhalb der flex-row */
+input[type="checkbox"] {
+    width: 28px;              /* ⬆ Extrem vergrößerte Checkbox für Touch */
+    height: 28px;
+    cursor: pointer;
+    margin: 0;
+}
+
+/* Alle Buttons (Start, Stop, Latenz) teilen sich diese Touch-Basis */
 button {
-    width: 100%;              /* gleich wie Inputs */
+    width: 100%;
     box-sizing: border-box;
-    padding: 18px;            /* ⬆ größer */
-    margin-top: 18px;
+    padding: 22px;            /* ⬆ Große, daumenfreundliche Klickhöhe */
+    margin-top: 24px;         /* ⬆ Mehr Abstand zum oberen Element */
     border: none;
-    border-radius: 14px;
-    font-size: 20px;
+    border-radius: 16px;
+    font-size: 22px;          /* ⬆ Gut lesbarer Button-Text */
     cursor: pointer;
     transition: 0.2s;
     font-weight: bold;
@@ -67,41 +108,44 @@ button:disabled {
     cursor: not-allowed;
 }
 
-.start {
-    background: #10b981;
+.start { background: #10b981; color: white; }
+.start:hover { background: #059669; }
+
+.stop { background: #ef4444; color: white; }
+.stop:hover { background: #dc2626; }
+
+/* --- SEPARATE TOUCH-BEREICHE FÜR LATENZ UND AUDIO (UNTEREINANDER) --- */
+
+.touch-section {
+    margin-top: 44px;         /* ⬆ Viel Trennungs-Abstand nach den Haupt-Buttons */
+    display: flex;
+    flex-direction: column;
+    gap: 12px;                /* Abstand zwischen Überschrift/Button und Text/Player */
 }
 
-.start:hover {
-    background: #059669;
+.inline-title {
+    margin: 14px 0 4px 0;     /* Harmonische Abstände für Zwischentitel */
+    font-size: 22px;          /* ⬆ Titel-Größe angepasst */
+    color: #cbd5e1;
 }
 
-.stop {
-    background: #ef4444;
-}
-
-.stop:hover {
-    background: #dc2626;
-}
-
-.status {
-    margin-bottom: 22px;
+#result {
+    font-weight: bold;
     font-size: 20px;
+    padding: 4px 0;
+    color: #f3f4f6;
 }
 
-.dot {
-    height: 14px;
-    width: 14px;
-    border-radius: 50%;
-    display: inline-block;
-    margin-right: 10px;
+/* Audio Player Anpassung */
+audio {
+    width: 100%;
+    height: 54px;             /* Standard-Höhe für mobile Audio-Steuerung */
+    margin-top: 6px;
 }
-
-.green { background: #22c55e; }
-.red { background: #ef4444; }
 
 .info {
-    margin-top: 16px;
-    font-size: 15px;
+    margin-top: 34px;         /* ⬆ Mehr Abstand zum Footer-Text */
+    font-size: 16px;
     color: #9ca3af;
     text-align: center;
 }

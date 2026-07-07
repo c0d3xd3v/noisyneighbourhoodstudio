@@ -52,7 +52,7 @@ Die Visualisierung gliedert sich in drei Bereiche:
 
 ## Hardware-Setup
 
-- **Mikrofon:** Rode NT-USB (kalibriertes Kondensatormikrofon, Studioqualität, kein Consumer-Gerät)
+- **Mikrofon:** Rode NT-USB mini (kalibriertes Kondensatormikrofon, Studioqualität, kein Consumer-Gerät)
 - **Positionierung:** ca. 70–80 cm unter der Zimmerdecke
 
 ## Installation

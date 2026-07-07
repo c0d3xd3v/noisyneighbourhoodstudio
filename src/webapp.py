@@ -25,9 +25,17 @@ def index():
         if d["max_input_channels"] > 0:
             devices.append({"id": i, "name": d["name"]})
 
+    # Liest den echten Geräte-Index aus Ihrer recorderlib aus
+    current_device = getattr(recorder, "rode_device_index", 0)
+
+    # Sicherheits-Fallback falls die Variable im Backend auf None steht
+    if current_device is None:
+        current_device = 0
+
     return render_template(
         "index.html",
         devices=devices,
+        current_device=current_device,
         running=recorder.service_running,
         threshold=recorder.db_threshold,
         samplerate=recorder.samplerate
@@ -65,6 +73,9 @@ def status():
     })
 
 
+import json
+from datetime import datetime
+
 @app.route("/upload_local", methods=["POST"])
 def upload_local():
     # 1. Prüfen, ob die Datei im Request existiert
@@ -76,17 +87,46 @@ def upload_local():
         return jsonify({"ok": False, "error": "Leerer Dateiname"}), 400
 
     # 2. Den Pfad direkt aus der recorder-Bibliothek auslesen
-    # Falls noch keine Session gestartet wurde, nutzen wir den aktuellen Ordner als Fallback
     target_dir = getattr(recorder, "data_dir", None)
-
     if not target_dir:
         return jsonify({"ok": False, "error": "Keine aktive Session in recorderlib gefunden"}), 400
 
-    # 3. Datei im exakten Session-Ordner abspeichern
-    file_path = os.path.join(target_dir, file.filename)
+    # 3. Dynamischen Namen generieren (Überschreibt das "local.wav" vom Browser)
+    sync_timestamp_ms = request.form.get("sync_server_timestamp")
+    
+    if sync_timestamp_ms:
+        try:
+            # Millisekunden-Zeitstempel in Sekunden für datetime umrechnen
+            timestamp_seconds = float(sync_timestamp_ms) / 1000.0
+            dt = datetime.fromtimestamp(timestamp_seconds)
+            
+            # Erzeugt das Format: 20260705_153020.619
+            formatted_time = dt.strftime("%Y%m%d_%H%M%S") + f".{dt.strftime('%f')[:3]}"
+            filename = f"remote_clip_{formatted_time}.wav"
+        except Exception:
+            # Fallback 1: Falls die Umrechnung schiefläuft
+            filename = f"remote_clip_fallback_{int(time.time() * 1000)}.wav"
+    else:
+        # Fallback 2: Falls kein Zeitstempel im Formular ankam
+        filename = f"remote_clip_notime_{int(time.time() * 1000)}.wav"
+
+    # 4. Datei im exakten Session-Ordner abspeichern
+    file_path = os.path.join(target_dir, filename)
     file.save(file_path)
 
-    return jsonify({"ok": True, "path": file_path})
+    # 5. Timing-Metadaten für alle Fälle als JSON mitsichern
+    timing_data = {
+        "browser_start_time_ms": request.form.get("browser_start_time"),
+        "calculated_server_start_time_ms": sync_timestamp_ms,
+        "upload_received_server_time_ms": time.time() * 1000,
+        "generated_filename": filename
+    }
+    
+    meta_path = os.path.join(target_dir, f"{filename}.json")
+    with open(meta_path, "w") as f:
+        json.dump(timing_data, f, indent=4)
+
+    return jsonify({"ok": True, "path": file_path, "filename": filename})
 
 
 if __name__ == "__main__":

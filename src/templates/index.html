@@ -10,6 +10,29 @@
 <body>
 
 <script>
+// Der Flask-Server schreibt den Zustand beim Connect direkt in das JavaScript
+let isRecording = {{ 'true' if running else 'false' }};
+
+// Globale Variablen für das präzise Timing-Tracking
+window.browserStartTime = null;
+window.syncServerTimestamp = null;
+
+// Sobald die Seite vollständig geladen ist, UI anpassen
+window.addEventListener('DOMContentLoaded', () => {
+    const statusDiv = document.getElementById("rec_status");
+    const localToggle = document.getElementById("local_rec_toggle");
+
+    if (isRecording) {
+        statusDiv.innerHTML = "📡 Remote-Triggerlogik läuft im Hintergrund...";
+        // Sicherheitsmaßnahme: Lokale Aufnahme deaktivieren, da alte Session weg ist
+        if (localToggle) {
+            localToggle.checked = false;
+            localToggle.disabled = true; // Sperren, da Remote bereits läuft
+        }
+    } else {
+        statusDiv.innerHTML = "bereit";
+    }
+});
 
 async function pingPong(count = 20) {
     let results = [];
@@ -37,81 +60,214 @@ async function pingPong(count = 20) {
 let recorder;
 let chunks = [];
 let stream;
-let isRecording = false;
+
+let audioContext;
+let scriptProcessor;
+let audioBufferLeft = []; // Speichert die rohen PCM-Samples
+let sampleRate = 0;
 
 async function startRecording() {
-
     if (isRecording) return;
 
-    // 1. Die aktuell ausgewählte Geräte-ID aus dem HTML-Dropdown auslesen
     const deviceSelect = document.querySelector('select[name="device"]');
-    const selectedDevice = deviceSelect ? deviceSelect.value : "0"; // Fallback auf "0", falls nicht gefunden
+    const selectedDevice = deviceSelect ? deviceSelect.value : "0";
 
-    // 2. Den aktuell eingegebenen Schwellenwert aus dem Input-Feld auslesen
     const thresholdInput = document.querySelector('input[name="threshold"]');
-    const selectedThreshold = thresholdInput ? thresholdInput.value : "-45"; // Bleibt leer, wenn nichts eingegeben wurde
+    const selectedThreshold = thresholdInput ? thresholdInput.value : "";
 
-    // Vorbereitung der Formulardaten für Flask (request.form)
+    const doLocalRec = document.getElementById("local_rec_toggle").checked;
+
+    // 1. ZUERST: Lokales Browser-Recording initialisieren und starten
+    if (doLocalRec) {
+        try {
+            stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            sampleRate = audioContext.sampleRate;
+            
+            const source = audioContext.createMediaStreamSource(stream);
+            scriptProcessor = audioContext.createScriptProcessor(4096, 1, 1);
+            audioBufferLeft = [];
+            
+            scriptProcessor.onaudioprocess = (event) => {
+                if (!isRecording) return;
+                const inputBuffer = event.inputBuffer.getChannelData(0);
+                audioBufferLeft.push(new Float32Array(inputBuffer));
+            };
+            
+            source.connect(scriptProcessor);
+            scriptProcessor.connect(audioContext.destination);
+            
+            // Lokalen Zeitstempel JETZT direkt beim echten Hardware-Start setzen
+            window.browserStartTime = Date.now();
+            document.getElementById("rec_status").innerHTML = "🔴 Lokale Aufnahme läuft, starte Jetson...";
+
+        } catch (err) {
+            console.error(err);
+            document.getElementById("rec_status").innerHTML = "❌ Lokaler Mikrofon-Zugriff verweigert! Abbruch.";
+            return; // Abbrechen, da der lokale Sync-Partner fehlt
+        }
+    } else {
+        // Fallback, falls lokale Aufnahme explizit deaktiviert wurde
+        window.browserStartTime = Date.now(); 
+    }
+
+    // 2. JETZT ERST: Präzise Latenz messen, während der Browser schon aufnimmt
+    let t0 = performance.now();
+    const pingResponse = await fetch("/ping");
+    const pingData = await pingResponse.json();
+    let t1 = performance.now();
+
+    const networkLatency = (t1 - t0) / 2;
+    // Exakte Server-Zeit berechnen, die mit unserem 'window.browserStartTime' korrespondiert
+    // window.syncServerTimestamp = (pingData.server_time * 1000) + networkLatency;
+
+    // NEU (Kompensiert die Zeit, die der Ping gedauert hat):
+    const zeitSeitAufnahmeStart = Date.now() - window.browserStartTime;
+    window.syncServerTimestamp = (pingData.server_time * 1000) + networkLatency - zeitSeitAufnahmeStart;
+
+    // 3. DANACH: Den Jetson-Server verzögert triggern
     const formData = new FormData();
-    formData.append("device", selectedDevice); // MUSS vorhanden sein. Ändern Sie "0" ggf. auf Ihren gewünschten Geräte-Index.
-    formData.append("threshold", selectedThreshold); // Optional, kann leer bleiben für 'None' im Backend
+    formData.append("device", selectedDevice);
+    formData.append("threshold", selectedThreshold);
 
-    // 1. Server Trigger AN
-    await fetch("/recording/start", {
+    const response = await fetch("/recording/start", {
         method: "POST",
-        body: formData // Nutzt FormData statt JSON. Der Browser setzt die Header hierbei automatisch!
+        body: formData
     });
 
-    // 2. Browser Recording START
-    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    isRecording = true;
 
-    recorder = new MediaRecorder(stream);
-    chunks = [];
-
-    recorder.ondataavailable = e => chunks.push(e.data);
-
-    recorder.onstart = () => {
-        isRecording = true;
-        document.getElementById("rec_status").innerHTML = "🔴 Aufnahme läuft...";
-    };
-
-    recorder.start();
+    if (response.ok) {
+        const statusContainer = document.getElementById("status_container");
+        if (statusContainer) {
+            statusContainer.innerHTML = '<span class="dot green"></span> Aktiv';
+        }
+        if (doLocalRec) {
+            document.getElementById("rec_status").innerHTML = "🔴 Aufnahme (WAV) + Remotelogik aktiv...";
+        } else {
+            document.getElementById("rec_status").innerHTML = "📡 Nur Remote-Triggerlogik aktiv";
+        }
+    }
 }
 
 async function stopRecording() {
-
-    if (!recorder || !isRecording) return;
-
-    // 1. Server Trigger AUS
-    await fetch("/recording/stop", {
-        method: "POST" // Auf POST umgestellt, Header entfernt
+    // 1. ZUERST: Den Jetson-Server stoppen und entschärfen
+    const response = await fetch("/recording/stop", {
+        method: "POST"
     });
 
-    recorder.onstop = () => {
+    if (response.ok) {
+        // Statusleuchte im Browser sofort auf Rot ("Gestoppt") umschalten
+        const statusContainer = document.getElementById("status_container");
+        if (statusContainer) {
+            statusContainer.innerHTML = '<span class="dot red"></span> Gestoppt';
+        }
+    }
 
-        isRecording = false;
+    isRecording = false;
 
-        const blob = new Blob(chunks, { type: "audio/webm" });
-        const url = URL.createObjectURL(blob);
+    const localToggle = document.getElementById("local_rec_toggle");
+    if (localToggle) localToggle.disabled = false; // Checkbox wieder freigeben
 
-        document.getElementById("rec_status").innerHTML =
-            "⏹ Aufnahme fertig";
+    // 2. ERST JETZT DANACH: Lokalen Browser-Recorder beenden, falls er läuft
+    // Da wir oben mit dem ScriptProcessor arbeiten, prüfen wir auf 'scriptProcessor'
+    if (scriptProcessor && audioContext) {
+        // Verbindung trennen, um die Aufnahme hardwareseitig einzufrieren
+        scriptProcessor.disconnect();
+        audioContext.close();
+        
+        // Mikrofon-Stream komplett abschalten
+        if (stream) {
+            stream.getTracks().forEach(t => t.stop());
+        }
 
-        // Player anzeigen
+        // Aus den gesammelten Float32-Arrays die WAV-Datei bauen
+        const wavBlob = createWavBlob(audioBufferLeft, sampleRate);
+        const url = URL.createObjectURL(wavBlob);
+        
+        document.getElementById("rec_status").innerHTML = "⏹ Aufnahme fertig (WAV)";
         document.getElementById("player").src = url;
-        document.getElementById("player").play();
+        
+        // Datei hochladen (Der Flask-Server benennt sie um)
+        uploadRecording(wavBlob);
+        
+        // Variablen zurücksetzen für die nächste Aufnahme
+        scriptProcessor = null;
+        audioContext = null;
+    } else {
+        document.getElementById("rec_status").innerHTML = "⏹ Remote-Logik gestoppt";
+    }
+}
 
-        uploadRecording(blob);
-    };
+// Hilfsfunktion: Wandelt das rohe Float32-Array in ein 16-Bit PCM WAV-Format um
+function createWavBlob(buffers, sRate) {
+    // 1. Alle Buffer-Teile zu einem einzigen flachen Array verschmelzen
+    let totalLength = buffers.reduce((acc, buf) => acc + buf.length, 0);
+    let result = new Float32Array(totalLength);
+    let offset = 0;
+    for (let buf of buffers) {
+        result.set(buf, offset);
+        offset += buf.length;
+    }
 
-    recorder.stop();
+    // 2. WAV-Header erstellen (44 Bytes)
+    let buffer = new ArrayBuffer(44 + result.length * 2);
+    let view = new DataView(buffer);
 
-    stream.getTracks().forEach(t => t.stop());
+    /* RIFF identifier */
+    writeString(view, 0, 'RIFF');
+    /* file length */
+    view.setUint32(4, 36 + result.length * 2, true);
+    /* RIFF type */
+    writeString(view, 8, 'WAVE');
+    /* format chunk identifier */
+    writeString(view, 12, 'fmt ');
+    /* format chunk length */
+    view.setUint32(16, 16, true);
+    /* sample format (raw PCM = 1) */
+    view.setUint16(20, 1, true);
+    /* channel count (Mono = 1) */
+    view.setUint16(22, 1, true);
+    /* sample rate */
+    view.setUint32(24, sRate, true);
+    /* byte rate (sample rate * block align) */
+    view.setUint32(28, sRate * 2, true);
+    /* block align (channel count * bytes per sample) */
+    view.setUint16(32, 2, true);
+    /* bits per sample (16-bit PCM) */
+    view.setUint16(34, 16, true);
+    /* data chunk identifier */
+    writeString(view, 36, 'data');
+    /* data chunk length */
+    view.setUint32(40, result.length * 2, true);
+
+    // 3. Float32 Audiodaten in Int16 (16-Bit) konvertieren und in die Datei schreiben
+    let index = 44;
+    for (let i = 0; i < result.length; i++) {
+        let s = Math.max(-1, Math.min(1, result[i]));
+        view.setInt16(index, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+        index += 2;
+    }
+
+    return new Blob([view], { type: 'audio/wav' });
+}
+
+function writeString(view, offset, string) {
+    for (let i = 0; i < string.length; i++) {
+        view.setUint8(offset + i, string.charCodeAt(i));
+    }
 }
 
 async function uploadRecording(blob) {
     const form = new FormData();
-    form.append("file", blob, "local.webm");
+    // WICHTIG: Dateiname im JavaScript auf .wav ändern!
+    form.append("file", blob, "local.wav");
+
+    if (window.browserStartTime && window.syncServerTimestamp) {
+        form.append("browser_start_time", window.browserStartTime);
+        form.append("sync_server_timestamp", window.syncServerTimestamp);
+    }
 
     await fetch("/upload_local", {
         method: "POST",
@@ -121,14 +277,13 @@ async function uploadRecording(blob) {
 
 </script>
 
-
 <div class="container">
 
     <h1>🎤 Audio Trigger Recorder</h1>
 
     <div class="card">
 
-        <div class="status">
+        <div class="status" id="status_container">
             {% if running %}
                 <span class="dot green"></span> Aktiv
             {% else %}
@@ -136,41 +291,53 @@ async function uploadRecording(blob) {
             {% endif %}
         </div>
 
+        <label>Mikrofon</label>
+        <select name="device">
+            {% for d in devices %}
+                <!-- NEU: d.id == current_device steuert den Reconnect-Zustand -->
+                <option value="{{d.id}}" {% if d.id == current_device %}selected{% endif %}>
+                    {{d.id}} - {{d.name}}
+                </option>
+            {% endfor %}
+        </select>
 
-            <label>Mikrofon</label>
-            <select name="device">
-                {% for d in devices %}
-                    <option value="{{d.id}}">{{d.id}} - {{d.name}}</option>
-                {% endfor %}
-            </select>
+        <label>Trigger (dB)</label>
+        <input type="number" step="0.1" name="threshold" placeholder="{{ threshold }}">
 
-            <label>Trigger (dB)</label>
-            <input type="number" step="0.1" name="threshold"
-                   placeholder="{{ threshold }}">
+        <div class="info">
+            Samplerate: {{ samplerate }} Hz
+        </div>
 
-            <div class="info">
-                Samplerate: {{ samplerate }} Hz
-            </div>
+        <div class="checkbox-row">
+            <label class="checkbox-container" for="local_rec_toggle">
+                Lokale Audioaufnahme
+            </label>
+            <input type="checkbox" id="local_rec_toggle" checked>
+        </div>
 
-            <button class="start" type="button" onclick="startRecording()">
-                ▶ Start
-            </button>
+        <button class="start" type="button" onclick="startRecording()">
+            ▶ Start
+        </button>
 
+        <button class="stop" type="button" onclick="stopRecording()">
+            ■ Stop
+        </button>
 
+        <div id="rec_status">bereit</div>
+        
+        <!-- Bereich: Netzwerklatenz untereinander mit neuer touch-section Klasse -->
+        <div class="touch-section">
+            <button type="button" onclick="pingPong()">Netzwerklatenz messen</button>
+            <h2 class="inline-title">Netzwerklatenz:</h2>
+            <div id="result">Noch kein Test gestartet</div>
+        </div>
 
-            <button class="stop" type="button" onclick="stopRecording()">
-                ■ Stop
-            </button>
-
-            <div id="rec_status">bereit</div>
-
-        <button onclick="pingPong()">Netzwerklatenz messen</button>
-        <h2>Netzwerklatenz : </h2>
-        <div id="result">Noch kein Test gestartet</div>
-
-        <h2>Lokale Aufnahme</h2>
-        <audio id="player" controls></audio>
-
+        <!-- Bereich: Lokale Aufnahme untereinander mit neuer touch-section Klasse -->
+        <div class="touch-section">
+            <h2 class="inline-title">Lokale Aufnahme:</h2>
+            <audio id="player" controls></audio>
+        </div>
+        
     </div>
 
 </div>
