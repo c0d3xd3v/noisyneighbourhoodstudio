@@ -29,7 +29,7 @@ audio_output = None
 current_audio_file = ""
 
 # === Verzeichnisstruktur ===
-data_root = "/home/kaih/Dokumente/ruhestoerung_2025/daten/klingel_schallbrücke"
+data_root = "/home/kaih/Downloads/data/"
 FAVORITES_FILE = os.path.join(data_root, "favorites.json")
 
 # === Favoriten laden/speichern ===

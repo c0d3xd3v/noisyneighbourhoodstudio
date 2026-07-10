@@ -1,13 +1,45 @@
-import time, os
+import time, os, sys
 from flask import jsonify
-from flask import Flask, render_template, request, redirect, jsonify
+from flask import Flask, render_template, request, redirect, jsonify, Response
 import sounddevice as sd
+import threading
+import queue 
+
 import recorder
 
 session_start = None
-
 app = Flask(__name__)
 
+# ==============================================================================
+# HIER DEN OPTIMIERTEN LOG-OBSERVER EINFÜGEN
+# ==============================================================================
+class TriggerEventObserver:
+    def __init__(self):
+        self.terminal = sys.stdout
+        self.subscribers = []
+
+    def write(self, message):
+        self.terminal.write(message)
+        # Filtert gezielt die Zeile aus deinem Backend-Skript
+        if "🔔 Trigger erkannt" in message:
+            clean_msg = message.strip().replace('\r', '')
+            for q in self.subscribers:
+                q.put(clean_msg)
+
+    def flush(self):
+        self.terminal.flush()
+
+    def subscribe(self):
+        q = queue.Queue()
+        self.subscribers.append(q)
+        return q
+
+    def unsubscribe(self, q):
+        if q in self.subscribers:
+            self.subscribers.remove(q)
+
+# System-Output global auf unseren neuen Observer umleiten
+sys.stdout = TriggerEventObserver()
 
 @app.route("/session/start")
 def start_session():
@@ -41,6 +73,39 @@ def index():
         samplerate=recorder.samplerate
     )
 
+# 1. WICHTIG: Erlaube Flask, Pfade mit ODER ohne "/" am Ende exakt gleich zu routen
+app.url_map.strict_slashes = False
+
+# 2. WICHTIG: CORS-Header setzen, damit die IP-Adresse 192.168.1.4 zugreifen darf
+@app.after_request
+def add_cors_headers(response):
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    return response
+
+@app.route('/api/events')
+def sse_endpoint():
+    event_queue = sys.stdout.subscribe()
+
+    def event_generator():
+        try:
+            while True:
+                log_line = event_queue.get()
+                yield f"data: {log_line}\n\n"
+        except GeneratorExit:
+            sys.stdout.unsubscribe(event_queue)
+
+    # 3. WICHTIG: Richtige Header für SSE erzwingen
+    return Response(
+        event_generator(), 
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no'  # Verhindert Proxy-Buffering (z.B. Nginx)
+        }
+    )
 
 @app.route("/recording/start", methods=["POST"])
 def start():
@@ -130,5 +195,6 @@ def upload_local():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False, ssl_context=("/home/defaultuser/certs/cert.pem",
+    app.run(host="0.0.0.0", port=5000, threaded=True, debug=False, ssl_context=("/home/defaultuser/certs/cert.pem",
                  "/home/defaultuser/certs/key.pem"))
+

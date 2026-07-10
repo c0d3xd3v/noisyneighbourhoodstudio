@@ -275,6 +275,16 @@ async function uploadRecording(blob) {
     });
 }
 
+document.addEventListener('DOMContentLoaded', function() {
+    const eventSource = new EventSource('/api/events');
+    const triggerDisplay = document.getElementById('latest-trigger');
+
+    eventSource.onmessage = function(event) {
+        // Überschreibt den Inhalt immer mit dem allerneuesten Event
+        triggerDisplay.innerText = event.data;
+    };
+});
+
 </script>
 
 <div class="container">
@@ -339,6 +349,14 @@ async function uploadRecording(blob) {
         </div>
         
     </div>
+
+    <div class="card">
+    <h3>Letztes Trigger-Ereignis</h3>
+    <!-- Ein einzelnes Element, das bei jedem Event überschrieben wird -->
+    <div id="latest-trigger" style="font-size: 1.2em; color: #dc3545; font-weight: bold;">
+        Warte auf den ersten Trigger...
+    </div>
+</div>
 
 </div>
 
