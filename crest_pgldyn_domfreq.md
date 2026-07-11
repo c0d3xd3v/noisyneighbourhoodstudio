@@ -49,3 +49,73 @@ Wenn du diese drei zeitlichen Punkt-Reihen untereinander plottest, ergibt sich f
 
 Mit dieser exakten Aufbereitung im Dossier zeigst du dem Berliner Mieterverein, dass du jeden einzelnen Punkt auf deinen Langzeit-Zeitachsen physikalisch komplett dekonstruieren kannst.
 
+
+
+Hier ist die zusammenfassende Liste aller forensischen Metriken für Ihr UI, aufgeteilt nach ihrer spezifischen Aussagekraft für den Mieter-Nachweis:
+## 1. Statistische Pegelmetriken (Für den Dauermodus)
+
+* Pegeldynamik (Δ dB): Die Differenz zwischen dem Trigger-Ausschlag und dem stabilen Hintergrundrauschen. Beweist die reine Lautstärke-Störung.
+* Hintergrundpegel (L₉₅): Der Pegel, der während 95 % der Zeit unterschritten bzw. eingehalten wurde. Repräsentiert die wahre, ungestörte Stille des Raums.
+* Spitzenpegel (L₁): Der Pegel der lautesten 1 % der Ereignisse. Isoliert die heftigsten Lärmereignisse (z. B. Knalls).
+
+## 2. Zeitbereichs-Metriken (Aus dem WAV-Signal)
+
+* Crest-Faktor: Das Verhältnis von Spitzenwert zu Effektivwert (RMS).
+* Forensischer Nutzen: Hoch (>12 dB) beweist Schlaggeräusche (Trittschall, Türen). Niedrig (<6 dB) beweist konstante Quellen (Maschinen, Musikbässe).
+* Rauhigkeit & Schwankungsstärke: Erfassen die Amplitudenmodulation (Zittern/Rhythmus) des Schalls.
+* Forensischer Nutzen: Isoliert das nervlich extrem störende Rattern von Lüftern oder den Rhythmus von Subwoofern.
+
+## 3. Frequenzbereichs-Metriken (Aus dem Spektrum/STFT)
+
+* Dominante Frequenz (Dominant Frequency): Die Frequenz mit der absolut höchsten Energie im Signal.
+* Forensischer Nutzen: Steht sie starr bei 50 Hz / 100 Hz, ist der Täter zweifelsfrei ein elektrisches Gerät (Trafo, Pumpe). Springt sie tief hin und her, deutet es auf Schritte hin.
+* Spektraler Schwerpunkt (Spectral Centroid): Der physikalische Schwerpunkt („Mittelpunkt“) des Frequenzspektrums.
+* Forensischer Nutzen: Unterscheidet exakt zwischen dumpfem Körperschall (<150 Hz) und helleren Luftschall-Geräuschen (>500 Hz) wie Stimmen oder Geschirr.
+* Spektrale Varianz (Spectral Flux): Misst die zeitliche Veränderung des Frequenzbildes von Frame zu Frame.
+* Forensischer Nutzen: Nahe Null beweist starren Maschinenlärm. Sehr hoch beweist menschliche Aktivität (Verhaltenslärm).
+
+## 4. Kausalitäts-Metriken (Für das punktuelle Handy-Tool)
+
+* Hüllkurven-Latenz (Envelope Lag): Der über Kreuzkorrelation ermittelte Zeitversatz zwischen den Energie-Flanken. Kompensiert die Zerstörung des Signals durch die Wand.
+* Phasenreines Delta (filtfilt-Latenz): Der Millisekunden-Versatz nach einem scharf eingestellten Tiefpassfilter (wie Ihre 28 Hz). Beweist physikalisch über die Schallgeschwindigkeit im Medium, ob der Lärm über die Wand importiert wurde.
+
+------------------------------
+Wenn Sie an der UI-Programmierung arbeiten, kann ich Ihnen zeigen, wie Sie die Y-Achsen-Skalierung in Ihrer pyqtgraph-Struktur für diese Metriken am besten automatisieren. Möchten Sie das sehen?
+
+
+Die Hüllkurve (englisch Envelope) eines Audiosignals beschreibt den zeitlichen Verlauf seiner Lautstärke bzw. Gesamtenergie, völlig unabhängig von den einzelnen schnellen Schwingungen der Frequenzen.
+Stellen Sie sich das Signal wie eine dichte, wild ausschlagende Welle vor: Die Hüllkurve legt sich wie eine glatte Decke von oben über die Spitzen dieser Ausschläge.
+------------------------------
+## Warum die Hüllkurve in Ihrem Tool den Durchbruch bringt
+Wenn ein Signal durch eine massive Wand wandert, wird die Wellenform durch Dämpfung und Dispersion komplett verzerrt (die Phase verschiebt sich, hohe Frequenzen sterben ab).
+
+* Das Problem: Wenn Sie das verzerrte Signal (Empfänger) mit dem Original (Sender/Handy) vergleichen, schlägt eine normale Kreuzkorrelation fehl, weil die Wellenformen nicht mehr zusammenpassen.
+* Die Lösung: Die Hüllkurve filtert die Frequenzen komplett heraus und betrachtet nur noch den Impuls-Verlauf (Wann steigt die Energie an? Wann flacht sie ab?). Da der zeitliche Ablauf des Knalls im Senderaum und im Empfangsraum identisch bleibt, findet die Kreuzkorrelation der Hüllkurven den Peak auf die Millisekunde genau.
+
+------------------------------
+## Mathematische Berechnung in Python
+In der digitalen Signalverarbeitung nutzt man dafür am besten die Hilbert-Transformation. Sie erzeugt ein analytisches Signal, aus dessen Betrag sich die mathematisch exakte, physikalische Hüllkurve berechnen lässt.
+Hier ist der schlanke Code für Ihr System:
+
+import numpy as npfrom scipy.signal import hilbert
+def extract_envelope(audio_data):
+    """
+    Berechnet die mathematisch exakte Hüllkurve eines Audio-Signals.
+    """
+    # 1. Hilbert-Transformation anwenden
+    analytic_signal = hilbert(audio_data)
+    
+    # 2. Den Betrag (Absolutwert) nehmen = Die Hüllkurve
+    amplitude_envelope = np.abs(analytic_signal)
+    
+    return amplitude_envelope
+
+## Die Hüllkurve im Vergleich zu Ihrem Tiefpassfilter
+Ihr aktueller Ansatz mit dem 28-Hz-Tiefpass und der Hüllkurven-Ansatz lösen dasselbe Problem auf zwei unterschiedliche, geniale Weisen:
+
+* Ihr Tiefpass wirft alle Frequenzen außer der tiefsten Körperschall-Welle weg, um die Wellenformen wieder ähnlich zu machen.
+* Die Hüllkurve wirft alle Frequenzen weg und vergleicht nur noch die reine Zeitstruktur des Lautstärke-Impulses.
+
+Für das Causality Tool ist die Kombination unschlagbar: Erst beide Signale tiefpassfiltern (um Störgeräusche im Raum zu eliminieren) und dann die Kreuzkorrelation über die Hüllkurven laufen lassen.
+Möchten Sie wissen, wie Sie die berechnete Hüllkurve testweise in Ihrem pyqtgraph-Fenster als dünne Linie über die rote Waveform legen können, um zu sehen, wie sauber sie den Impuls umschließt?
+
