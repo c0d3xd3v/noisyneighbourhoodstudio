@@ -12,19 +12,24 @@ Dieses Modul selbst enthält keine Berechnungs- oder I/O-Logik, nur Verdrahtung.
 
 import os
 import shutil
-from typing import Optional
+import tempfile
+from typing import Dict, Optional, Tuple
 
+import soundfile as sf
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QMessageBox,
     QTreeWidget, QTreeWidgetItem, QTabWidget, QListWidget, QListWidgetItem,
-    QFileDialog, QComboBox,
+    QFileDialog, QComboBox, QProgressBar, QDoubleSpinBox,
 )
-from PySide6.QtCore import Qt, QUrl, QTime
+from PySide6.QtCore import Qt, QUrl, QTime, QThread
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput, QMediaDevices
 
 import session_repository
+import metric_cache
+import audio_filter
 from models import SessionData, FavoriteEntry
-from metrics import MetricRegistry
+from metrics import MetricRegistry, MetricResult
+from metric_worker import MetricWorker
 from plot_view import TriggerPlotWidget
 from audio_render import AudioRenderWidget
 from clock_widget import AnalogClockWidget
@@ -40,13 +45,23 @@ class MainWindow(QWidget):
         self.current_event_index: Optional[int] = None
         self.current_metric_key: str = MetricRegistry.default_key()
 
-        self.media_player = QMediaPlayer()
-        self.audio_output = QAudioOutput()
-        self.media_player.setAudioOutput(self.audio_output)
-        self.audio_output.setVolume(0.8)
+        self._metric_thread: Optional[QThread] = None
+        self._metric_worker: Optional[MetricWorker] = None
+        self._pending_highlight_index: Optional[int] = None
+        self._pending_cache_key: Optional[Tuple[str, str]] = None
+
+        # Metrik-Ergebnisse pro (Session-Pfad, Metrik-Schlüssel) - erspart
+        # das Neuberechnen beim Hin- und Herschalten zwischen Metriken.
+        # Geht davon aus, dass Sessions nach dem Aufnehmen unverändert bleiben.
+        self._metric_cache: Dict[Tuple[str, str], MetricResult] = {}
+
+        self.media_player: Optional[QMediaPlayer] = None
+        self.audio_output: Optional[QAudioOutput] = None
+        self._filtered_temp_path: Optional[str] = None
 
         self._build_ui()
         self._wire_signals()
+        self._on_filter_type_changed()
 
         self._populate_project_combo()
         self._update_window_title()
@@ -105,6 +120,13 @@ class MainWindow(QWidget):
         for metric in MetricRegistry.all():
             self.metric_combo.addItem(metric.display_name, userData=metric.key)
         metric_row.addWidget(self.metric_combo)
+
+        self.metric_progress = QProgressBar()
+        self.metric_progress.setVisible(False)
+        self.metric_progress.setFixedWidth(200)
+        self.metric_progress.setFormat("%v / %m")
+        metric_row.addWidget(self.metric_progress)
+
         metric_row.addStretch()
         content_layout.addLayout(metric_row)
 
@@ -123,6 +145,39 @@ class MainWindow(QWidget):
         content_layout.addWidget(self.play_button)
         content_layout.addWidget(self.fav_button)
         content_layout.addWidget(self.save_button)
+
+        # Filter-Vorschau für die Wiedergabe - wirkt nur auf's Anhören,
+        # Waveform/Spektrogramm oben zeigen weiterhin das unveränderte Original
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(QLabel("Filter:"))
+
+        self.filter_type_combo = QComboBox()
+        self.filter_type_combo.addItem("Tiefpass", userData=audio_filter.LOWPASS)
+        self.filter_type_combo.addItem("Hochpass", userData=audio_filter.HIGHPASS)
+        self.filter_type_combo.addItem("Bandpass", userData=audio_filter.BANDPASS)
+        filter_row.addWidget(self.filter_type_combo)
+
+        self.filter_cutoff_low = QDoubleSpinBox()
+        self.filter_cutoff_low.setRange(1.0, 24000.0)
+        self.filter_cutoff_low.setValue(300.0)
+        self.filter_cutoff_low.setSuffix(" Hz")
+        filter_row.addWidget(self.filter_cutoff_low)
+
+        self.filter_cutoff_high_label = QLabel("bis")
+        filter_row.addWidget(self.filter_cutoff_high_label)
+
+        self.filter_cutoff_high = QDoubleSpinBox()
+        self.filter_cutoff_high.setRange(1.0, 24000.0)
+        self.filter_cutoff_high.setValue(3000.0)
+        self.filter_cutoff_high.setSuffix(" Hz")
+        filter_row.addWidget(self.filter_cutoff_high)
+
+        self.filter_play_button = QPushButton("🎚 Gefiltert abspielen")
+        self.filter_play_button.setEnabled(False)
+        filter_row.addWidget(self.filter_play_button)
+
+        filter_row.addStretch()
+        content_layout.addLayout(filter_row)
 
         self.audio_render = AudioRenderWidget()
         self.clock_widget = AnalogClockWidget()
@@ -149,10 +204,11 @@ class MainWindow(QWidget):
         self.save_button.clicked.connect(self._save_current_clip)
         self.fav_button.clicked.connect(self._add_current_as_favorite)
 
+        self.filter_type_combo.currentIndexChanged.connect(self._on_filter_type_changed)
+        self.filter_play_button.clicked.connect(self._play_filtered_clip)
+
         self.favorites_list.itemClicked.connect(self._on_favorite_clicked)
         self.remove_fav_button.clicked.connect(self._remove_selected_favorite)
-
-        self.media_player.positionChanged.connect(self.audio_render.update_playback_cursor)
 
     # -------------------------------------------------------------- Projekt
 
@@ -177,6 +233,7 @@ class MainWindow(QWidget):
         self.play_button.setEnabled(False)
         self.save_button.setEnabled(False)
         self.fav_button.setEnabled(False)
+        self.filter_play_button.setEnabled(False)
         self.info_label.setText("Wähle links eine Session")
 
     def _activate_project(self, path: str):
@@ -223,10 +280,14 @@ class MainWindow(QWidget):
         self.current_session = session_repository.load_session(session_path)
         self.current_event_index = None
 
+        for metric_key, result in metric_cache.load(self.current_session).items():
+            self._metric_cache[(session_path, metric_key)] = result
+
         self._stop_playback()
         self.play_button.setEnabled(False)
         self.save_button.setEnabled(False)
         self.fav_button.setEnabled(False)
+        self.filter_play_button.setEnabled(False)
 
         highlight_index = None
         if highlight_clip:
@@ -235,7 +296,7 @@ class MainWindow(QWidget):
                     highlight_index = i
                     break
 
-        self._render_plot(highlight_index)
+        self._render_plot_async(highlight_index)
         self.info_label.setText(
             f"📁 Session: {self.current_session.session_name} – {len(self.current_session)} Trigger"
         )
@@ -274,20 +335,92 @@ class MainWindow(QWidget):
         )
         if reply == QMessageBox.Yes:
             shutil.rmtree(session_path)
+            self._invalidate_metric_cache(session_path)
             self._populate_session_tree()
+
+    def _invalidate_metric_cache(self, session_path: str):
+        keys_to_remove = [key for key in self._metric_cache if key[0] == session_path]
+        for key in keys_to_remove:
+            del self._metric_cache[key]
+        # kein metric_cache.clear() nötig - die Cache-Datei liegt im
+        # Session-Ordner und wird durch shutil.rmtree() bereits mit gelöscht
 
     # -------------------------------------------------------------- Metrik
 
-    def _render_plot(self, highlight_index: Optional[int] = None):
+    def _render_plot_async(self, highlight_index: Optional[int] = None):
         if self.current_session is None or self.current_session.is_empty:
             return
+        if self._metric_thread is not None:
+            return  # eine Berechnung läuft schon - Anfrage ignorieren statt überlappen
+
+        cache_key = (self.current_session.session_path, self.current_metric_key)
+        cached_result = self._metric_cache.get(cache_key)
+        if cached_result is not None:
+            self.plot_widget.render(self.current_session, cached_result, highlight_index)
+            return
+
         metric = MetricRegistry.get(self.current_metric_key)
-        result = metric.compute(self.current_session)
-        self.plot_widget.render(self.current_session, result, highlight_index)
+
+        self._set_busy(True)
+        self.metric_progress.setVisible(True)
+        self.metric_progress.setMinimum(0)
+        self.metric_progress.setMaximum(len(self.current_session))
+        self.metric_progress.setValue(0)
+
+        self._pending_highlight_index = highlight_index
+        self._pending_cache_key = cache_key
+
+        thread = QThread(self)
+        worker = MetricWorker(metric, self.current_session)
+        worker.moveToThread(thread)
+
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._on_metric_progress)
+        worker.finished.connect(self._on_metric_finished)
+        worker.failed.connect(self._on_metric_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(self._on_metric_thread_finished)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+
+        self._metric_thread = thread
+        self._metric_worker = worker
+        thread.start()
+
+    def _on_metric_progress(self, done: int, total: int):
+        self.metric_progress.setMaximum(total)
+        self.metric_progress.setValue(done)
+
+    def _on_metric_finished(self, result):
+        if self._pending_cache_key is not None:
+            self._metric_cache[self._pending_cache_key] = result
+            _session_path, metric_key = self._pending_cache_key
+            metric_cache.save_one(self.current_session, metric_key, result)
+        self.plot_widget.render(self.current_session, result, self._pending_highlight_index)
+        self._pending_highlight_index = None
+        self._pending_cache_key = None
+
+    def _on_metric_failed(self, message: str):
+        QMessageBox.critical(self, "Fehler bei Metrik-Berechnung", message)
+
+    def _on_metric_thread_finished(self):
+        self.metric_progress.setVisible(False)
+        self._set_busy(False)
+        self._metric_thread = None
+        self._metric_worker = None
+
+    def _set_busy(self, busy: bool):
+        """Sperrt Navigation, solange eine Metrik-Berechnung im Hintergrund läuft -
+        verhindert überlappende Berechnungen und Klicks auf inzwischen veraltete Daten."""
+        for widget in (self.metric_combo, self.session_tree, self.favorites_list,
+                       self.import_button, self.delete_button,
+                       self.project_button, self.project_combo):
+            widget.setEnabled(not busy)
 
     def _on_metric_changed(self, _index: int):
         self.current_metric_key = self.metric_combo.currentData()
-        self._render_plot(self.current_event_index)
+        self._render_plot_async(self.current_event_index)
 
     # --------------------------------------------------------------- Klick
 
@@ -308,13 +441,38 @@ class MainWindow(QWidget):
         self.play_button.setEnabled(True)
         self.save_button.setEnabled(True)
         self.fav_button.setEnabled(True)
+        self.filter_play_button.setEnabled(True)
 
     # ------------------------------------------------------------ Playback
+
+    def _ensure_media_player(self):
+        """Erzeugt QMediaPlayer/QAudioOutput erst beim ersten Abspielen, nicht
+        beim Programmstart - vermeidet, dass der FFmpeg-Multimedia-Backend
+        beim Konstruieren bereits interne Threads/Timer anlegt, bevor das
+        Hauptfenster überhaupt sichtbar ist (siehe Crash-Report)."""
+        if self.media_player is not None:
+            return
+        self.media_player = QMediaPlayer()
+        self.audio_output = QAudioOutput()
+        self.media_player.setAudioOutput(self.audio_output)
+        self.audio_output.setVolume(0.8)
+        self.media_player.positionChanged.connect(self.audio_render.update_playback_cursor)
+        self.media_player.playbackStateChanged.connect(self._on_playback_state_changed)
+
+    def _on_playback_state_changed(self, state):
+        """Reagiert sowohl auf natürliches Ende des Clips als auch auf
+        explizites Stoppen - ohne das würden die Play-Buttons nach dem
+        ersten Durchlauf dauerhaft deaktiviert bleiben."""
+        if state != QMediaPlayer.PlayingState:
+            self.audio_render.clear_playback_cursor()
+            self.play_button.setEnabled(self.current_event_index is not None)
+            self.filter_play_button.setEnabled(self.current_event_index is not None)
 
     def _play_current_clip(self):
         data, _sr = self.audio_render.last_audio
         if data is None or self.current_session is None or self.current_event_index is None:
             return
+        self._ensure_media_player()
         self._stop_playback()
 
         self.audio_render.show_playback_cursor()
@@ -325,13 +483,64 @@ class MainWindow(QWidget):
         self.media_player.play()
 
         self.play_button.setEnabled(False)
+        self.filter_play_button.setEnabled(False)
         self.info_label.setText("🔊 Wiedergabe läuft...")
 
     def _stop_playback(self):
-        if self.media_player.playbackState() == QMediaPlayer.PlayingState:
+        if self.media_player is not None and self.media_player.playbackState() == QMediaPlayer.PlayingState:
             self.media_player.stop()
         self.audio_render.clear_playback_cursor()
         self.play_button.setEnabled(self.current_event_index is not None)
+        self.filter_play_button.setEnabled(self.current_event_index is not None)
+
+    def _on_filter_type_changed(self):
+        is_bandpass = self.filter_type_combo.currentData() == audio_filter.BANDPASS
+        self.filter_cutoff_high_label.setEnabled(is_bandpass)
+        self.filter_cutoff_high.setEnabled(is_bandpass)
+
+    def _play_filtered_clip(self):
+        data, sr = self.audio_render.last_audio
+        if data is None or self.current_session is None or self.current_event_index is None:
+            return
+
+        filter_type = self.filter_type_combo.currentData()
+        cutoff_low = self.filter_cutoff_low.value()
+        cutoff_high = self.filter_cutoff_high.value() if filter_type == audio_filter.BANDPASS else None
+
+        try:
+            filtered = audio_filter.apply_filter(data, sr, filter_type, cutoff_low, cutoff_high)
+        except Exception as e:
+            QMessageBox.critical(self, "Filterfehler", str(e))
+            return
+
+        self._ensure_media_player()
+        self._stop_playback()
+        self._cleanup_filtered_temp_file()
+
+        fd, temp_path = tempfile.mkstemp(suffix=".wav", prefix="nns_filtered_")
+        os.close(fd)
+        sf.write(temp_path, filtered, sr)
+        self._filtered_temp_path = temp_path
+
+        self.audio_render.show_playback_cursor()
+
+        self.audio_output.setDevice(QMediaDevices.defaultAudioOutput())
+        self.media_player.setSource(QUrl.fromLocalFile(temp_path))
+        self.media_player.play()
+
+        self.filter_play_button.setEnabled(False)
+        self.play_button.setEnabled(False)
+        label = self.filter_type_combo.currentText()
+        cutoff_text = f"{cutoff_low:.0f} Hz" if cutoff_high is None else f"{cutoff_low:.0f}–{cutoff_high:.0f} Hz"
+        self.info_label.setText(f"🎚 Gefilterte Wiedergabe ({label}, {cutoff_text}) — Original bleibt in Waveform/Spektrogramm unverändert")
+
+    def _cleanup_filtered_temp_file(self):
+        if self._filtered_temp_path and os.path.exists(self._filtered_temp_path):
+            try:
+                os.remove(self._filtered_temp_path)
+            except OSError:
+                pass
+        self._filtered_temp_path = None
 
     # ------------------------------------------------------------ Speichern
 
@@ -340,7 +549,6 @@ class MainWindow(QWidget):
         if data is None:
             QMessageBox.warning(self, "Kein Clip", "Kein Audioclip geladen.")
             return
-        import soundfile as sf
         save_path, _ = QFileDialog.getSaveFileName(
             self, "Clip speichern als...", "clip.wav", "WAV-Dateien (*.wav)"
         )
@@ -419,4 +627,8 @@ class MainWindow(QWidget):
 
     def closeEvent(self, event):
         self._stop_playback()
+        self._cleanup_filtered_temp_file()
+        if self._metric_thread is not None:
+            self._metric_thread.quit()
+            self._metric_thread.wait(3000)
         super().closeEvent(event)

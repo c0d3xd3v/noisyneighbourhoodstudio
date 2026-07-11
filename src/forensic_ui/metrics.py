@@ -10,7 +10,7 @@ Kein anderer Code muss angefasst werden.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Type
+from typing import Callable, Dict, List, Optional, Type
 
 import numpy as np
 from scipy.signal import stft
@@ -31,12 +31,15 @@ class MetricResult:
     point_labels: Optional[List[str]] = None
 
 
+ProgressCallback = Callable[[int, int], None]  # (erledigt, gesamt)
+
+
 class Metric(ABC):
     key: str = ""
     display_name: str = ""
 
     @abstractmethod
-    def compute(self, session: SessionData) -> MetricResult:
+    def compute(self, session: SessionData, on_progress: Optional[ProgressCallback] = None) -> MetricResult:
         ...
 
 
@@ -71,7 +74,7 @@ class TriggerLevelMetric(Metric):
     key = "trigger_level"
     display_name = "Pegelverlauf (relativ, dB)"
 
-    def compute(self, session: SessionData) -> MetricResult:
+    def compute(self, session: SessionData, on_progress: Optional[ProgressCallback] = None) -> MetricResult:
         if session.is_empty:
             return MetricResult(y_values=[])
 
@@ -109,17 +112,20 @@ class _PerClipAudioMetric(Metric):
     def _compute_value(self, data: np.ndarray, sr: int) -> float:
         raise NotImplementedError
 
-    def compute(self, session: SessionData) -> MetricResult:
+    def compute(self, session: SessionData, on_progress: Optional[ProgressCallback] = None) -> MetricResult:
         if session.is_empty:
             return MetricResult(y_values=[])
 
+        total = len(session.events)
         y_values = []
-        for event in session.events:
+        for i, event in enumerate(session.events):
             try:
                 data, sr = load_audio(event.audio_path)
                 y_values.append(self._compute_value(data, sr))
             except Exception:
                 y_values.append(float("nan"))  # Clip fehlt/kaputt -> Lücke im Plot
+            if on_progress:
+                on_progress(i + 1, total)
 
         labels = [e.label or "" for e in session.events]
         return MetricResult(
