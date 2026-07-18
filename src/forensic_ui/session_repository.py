@@ -10,6 +10,9 @@ from typing import Dict, List
 
 from models import TriggerEvent, SessionData, FavoriteEntry
 
+from causality_tool_interface import session_has_remote_clip
+
+
 DEFAULT_DATA_ROOT = "/home/kaih/Downloads/data/"
 CONFIG_PATH = os.path.expanduser("~/.config/noisy_neighbourhood_studio/config.json")
 _MAX_RECENT = 8
@@ -120,9 +123,12 @@ def load_session(session_path: str) -> SessionData:
         for row in rows
     ]
 
+    has_remote_clip = session_has_remote_clip(session_path)
+
     return SessionData(
         session_path=session_path,
         session_name=os.path.basename(session_path),
+        has_remote_clip=has_remote_clip,
         events=events,
     )
 

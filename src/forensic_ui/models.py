@@ -19,6 +19,7 @@ class TriggerEvent:
 class SessionData:
     session_path: str
     session_name: str
+    has_remote_clip: bool
     events: List[TriggerEvent] = field(default_factory=list)
 
     def __len__(self) -> int:

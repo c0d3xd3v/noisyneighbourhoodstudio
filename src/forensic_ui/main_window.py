@@ -34,6 +34,8 @@ from plot_view import TriggerPlotWidget
 from audio_render import AudioRenderWidget
 from clock_widget import AnalogClockWidget
 
+from causality_tool_interface import launch_kausaltool
+
 
 class MainWindow(QWidget):
     def __init__(self):
@@ -112,6 +114,17 @@ class MainWindow(QWidget):
         content_widget = QWidget()
         content_layout = QVBoxLayout(content_widget)
         main_layout.addWidget(content_widget, 4)
+
+        toolbar_layout = QHBoxLayout()
+        self.btn_kausal = QPushButton("🔗 Kausalanalyse öffnen")
+        self.btn_kausal.setEnabled(False)  # ausgegraut, bis eine passende Session geladen ist
+        self.btn_kausal.setToolTip(
+            "Öffnet das Session-Kausalitätstool für die geladene Session.\n"
+            "Nur verfügbar, wenn eine lange Handy-Aufnahme (remote_clip_*.wav\n"
+            "mit .json-Metadaten) im Session-Ordner liegt."
+        )
+        toolbar_layout.addWidget(self.btn_kausal)
+        content_layout.addLayout(toolbar_layout)
 
         # Metrik-Auswahl - hier kommt später einfach ein weiterer Eintrag rein
         metric_row = QHBoxLayout()
@@ -210,6 +223,8 @@ class MainWindow(QWidget):
         self.favorites_list.itemClicked.connect(self._on_favorite_clicked)
         self.remove_fav_button.clicked.connect(self._remove_selected_favorite)
 
+        self.btn_kausal.clicked.connect(self._on_open_kausaltool)
+
     # -------------------------------------------------------------- Projekt
 
     def _update_window_title(self):
@@ -257,6 +272,11 @@ class MainWindow(QWidget):
         if path and path != session_repository.get_data_root():
             self._activate_project(path)
 
+    # ------------------------------------------------------------- ToolBar
+
+    def _on_open_kausaltool(self):
+        launch_kausaltool(self.current_session.session_path)
+
     # ------------------------------------------------------------- Sessions
 
     def _populate_session_tree(self):
@@ -295,6 +315,11 @@ class MainWindow(QWidget):
                 if event.clip_filename == highlight_clip:
                     highlight_index = i
                     break
+
+        if self.current_session.has_remote_clip is True:
+            self.btn_kausal.setEnabled(True)
+        else:
+            self.btn_kausal.setEnabled(False)
 
         self._render_plot_async(highlight_index)
         self.info_label.setText(

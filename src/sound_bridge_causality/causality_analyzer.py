@@ -94,3 +94,160 @@ class CausalityAnalyzer:
             peak_to_peak_delay=peak_to_peak_delay,
             peak_time_remote=peak_time_remote,
         )
+
+
+def sweep_similarity(remote_window, clip_arr, sample_rate, cutoffs_hz, work_rate=1000):
+    """Übereinstimmung als Funktion der Tiefpass-Grenzfrequenz ("Frequenz-Sweep").
+
+    Beide Signale werden zunächst einmalig auf work_rate dezimiert (mit
+    Anti-Aliasing via resample_poly). Das hat zwei Effekte:
+      1. Tempo: die Korrelation läuft auf ~1/44 der Samples.
+      2. Numerik: bei work_rate=1000 Hz liegt z.B. ein 28-Hz-Cutoff bei
+         fc/Nyquist = 0.056 statt 0.0013 - der Butterworth-Filter arbeitet
+         dort auch in ba-Form stabil (das bekannte Problem extrem kleiner
+         normierter Grenzfrequenzen stellt sich gar nicht erst).
+
+    Gibt (cutoffs, similarities) als np.ndarrays zurück; similarities in 0..1.
+    """
+    from math import gcd
+
+    max_cutoff = max(cutoffs_hz)
+    if max_cutoff >= work_rate / 2 * 0.9:
+        raise ValueError(f"work_rate={work_rate} Hz zu niedrig für Cutoff {max_cutoff} Hz.")
+
+    if work_rate < sample_rate:
+        g = gcd(int(work_rate), int(sample_rate))
+        up, down = int(work_rate) // g, int(sample_rate) // g
+        remote_ds = signal.resample_poly(np.asarray(remote_window, dtype=np.float64), up, down)
+        clip_ds = signal.resample_poly(np.asarray(clip_arr, dtype=np.float64), up, down)
+        sr = work_rate
+    else:
+        remote_ds, clip_ds, sr = remote_window, clip_arr, sample_rate
+
+    analyzer = CausalityAnalyzer(sample_rate=sr)
+    sims = []
+    for cutoff in cutoffs_hz:
+        # Epoch-Parameter sind für die reine Ähnlichkeit irrelevant -> 0.0
+        res = analyzer.correlate(remote_ds, clip_ds, 0, 0.0, 0.0,
+                                 lowpass_cutoff_hz=float(cutoff))
+        sims.append(res.similarity)
+
+    return np.asarray(cutoffs_hz, dtype=float), np.asarray(sims, dtype=float)
+
+
+def spectral_similarity_search(remote_window, clip_arr, sample_rate,
+                                fmin=300.0, fmax=8000.0, hop_ms=2.0):
+    """Sucht die beste Übereinstimmung zwischen einem kurzen Template (clip_arr)
+    und einem längeren Suchfenster (remote_window) NICHT über die Form der
+    Wellenform im Zeitbereich, sondern über das Betragsspektrum in einem
+    festen Frequenzband [fmin, fmax] Hz.
+
+    Motivation: Die Wand wirkt als dispersives Übertragungssystem (Biegewellen
+    unterschiedlicher Frequenz laufen unterschiedlich schnell durch die
+    Struktur) - dadurch kann sich die ZEITLICHE Form eines Impulses beim
+    Durchqueren der Wand verzerren, auch wenn es sich um dasselbe Ereignis
+    handelt. Das Betragsspektrum (welche Frequenzanteile enthalten sind, in
+    welcher relativen Stärke) ist gegenüber genau dieser Verzerrung robuster,
+    weil es die Phaseninformation - und damit die zeitliche Form - ignoriert.
+
+    Für jede Kandidatenposition im Suchfenster wird ein gleich langes Segment
+    wie das Template ausgeschnitten, mit einem Hann-Fenster gewichtet, per FFT
+    in ein Betragsspektrum umgewandelt, auf das Band [fmin, fmax] beschränkt
+    und per Kosinus-Ähnlichkeit mit dem Template-Spektrum verglichen.
+
+    WICHTIG: Diese Metrik ist NICHT auf dieselbe Skala kalibriert wie die
+    zeitbereichsbasierte Kreuzkorrelation (dort: ~76% Zufallsniveau aus
+    empirischen Fehlpaarungen). Für die spektrale Ähnlichkeit muss ein
+    eigenes Zufallsniveau aus mehreren Fehlpaarungen gesammelt werden, bevor
+    ein Schwellenwert für "belastbar" sinnvoll festgelegt werden kann.
+
+    Rückgabe: dict mit best_offset_samples, best_similarity (0..1),
+    offsets_sec und similarities (komplette Suchkurve, für optionale
+    Visualisierung analog zum Korrelationsverlauf), sowie n_template.
+    """
+    sr = float(sample_rate)
+    remote = np.asarray(remote_window, dtype=np.float64)
+    templ = np.asarray(clip_arr, dtype=np.float64)
+    n_template = len(templ)
+
+    if n_template < 16:
+        raise ValueError("Template zu kurz (< 16 Samples).")
+    if len(remote) < n_template:
+        raise ValueError("Suchfenster kürzer als das Template.")
+
+    window = np.hanning(n_template)
+    freqs = np.fft.rfftfreq(n_template, d=1.0 / sr)
+    band_mask = (freqs >= fmin) & (freqs <= fmax)
+    if not np.any(band_mask):
+        raise ValueError(
+            f"Kein Frequenzbin im Band [{fmin:.0f},{fmax:.0f}] Hz bei "
+            f"Templatelänge {n_template} Samples ({sr:.0f} Hz)."
+        )
+
+    templ_spec = np.abs(np.fft.rfft(templ * window))[band_mask]
+    templ_norm = np.linalg.norm(templ_spec)
+    if templ_norm < 1e-12:
+        raise ValueError("Template enthält im gewählten Band keine messbare Energie.")
+
+    hop = max(1, int(round(sr * hop_ms / 1000.0)))
+    n_positions = (len(remote) - n_template) // hop + 1
+    if n_positions < 1:
+        raise ValueError("Suchfenster zu kurz für den gewählten Hop.")
+
+    # Rechenzeit-Deckel: Der Aufwand skaliert mit n_positions * n_template
+    # (jede Position braucht eine FFT über die volle Templatelänge). Bei
+    # langen Templates (z.B. mehrere Sekunden) würde ein feiner Hop über ein
+    # breites Suchfenster sonst Minuten dauern. MAX_SAMPLE_SLOTS ist grob auf
+    # ~3-4s Laufzeit kalibriert; wird die Grenze überschritten, wird der Hop
+    # automatisch vergrößert (zeitliche Auflösung der Fundstelle sinkt, der
+    # Ähnlichkeitswert selbst ist davon unberührt) und eine Warnung zurückgegeben.
+    MAX_SAMPLE_SLOTS = 2.5e8
+    warning = None
+    if n_positions * n_template > MAX_SAMPLE_SLOTS:
+        needed_positions = max(10, int(MAX_SAMPLE_SLOTS // n_template))
+        new_hop = max(hop, int(np.ceil((len(remote) - n_template) / max(1, needed_positions - 1))))
+        if new_hop > hop:
+            warning = (
+                f"Hop automatisch von {hop_ms:.1f} ms auf {new_hop * 1000.0 / sr:.1f} ms "
+                f"vergrößert, um die Rechenzeit bei einem Template von "
+                f"{n_template / sr * 1000:.0f} ms Länge zu begrenzen. Für feinere zeitliche "
+                f"Auflösung ein kürzeres Template verwenden (der Ähnlichkeitswert selbst "
+                f"bleibt davon unberührt)."
+            )
+            hop = new_hop
+            n_positions = (len(remote) - n_template) // hop + 1
+
+    starts = np.arange(n_positions) * hop
+    sims = np.empty(n_positions, dtype=np.float64)
+
+    # In Chunks verarbeiten, damit der Speicherbedarf unabhängig von
+    # Templatelänge und Suchfensterbreite begrenzt bleibt (statt ein
+    # n_positions x n_template großes Array auf einmal zu bauen).
+    chunk_size = max(1, int(2_000_000 // max(n_template, 1)))
+    for chunk_start in range(0, n_positions, chunk_size):
+        chunk_end = min(chunk_start + chunk_size, n_positions)
+        starts_chunk = starts[chunk_start:chunk_end]
+        idx = starts_chunk[:, None] + np.arange(n_template)[None, :]
+        segments = remote[idx] * window[None, :]
+        specs = np.abs(np.fft.rfft(segments, axis=1))[:, band_mask]
+        norms = np.linalg.norm(specs, axis=1)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            s = np.where(norms > 1e-12,
+                        (specs @ templ_spec) / (norms * templ_norm),
+                        0.0)
+        sims[chunk_start:chunk_end] = np.clip(s, 0.0, 1.0)
+
+    best_idx = int(np.argmax(sims))
+    offsets_sec = starts / sr
+
+    return {
+        "best_offset_samples": int(starts[best_idx]),
+        "best_similarity": float(sims[best_idx]),
+        "offsets_sec": offsets_sec,
+        "similarities": sims,
+        "hop_samples": hop,
+        "n_template": n_template,
+        "fmin": fmin,
+        "fmax": fmax,
+        "warning": warning,
+    }

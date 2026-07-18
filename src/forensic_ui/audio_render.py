@@ -78,7 +78,7 @@ class AudioRenderWidget:
         self.spectrogram_plot.addItem(self.spectrogram_img)
         self.spectrogram_plot.setXRange(t[0], t[-1], padding=0)
         self.spectrogram_plot.setYRange(0, 1000, padding=0)
-        self.spectrogram_plot.setLimits(xMin=t[0], xMax=t[-1], yMin=0, yMax=1000)
+        self.spectrogram_plot.setLimits(xMin=t[0], xMax=t[-1], yMin=0, yMax=f[-1])
         self.spectrogram_plot.enableAutoRange(axis=pg.ViewBox.XYAxes, enable=False)
 
         self._last_data = data
